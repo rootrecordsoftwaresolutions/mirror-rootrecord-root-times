@@ -1,33 +1,30 @@
 package com.rootrecord.minecraft.roottimes.cloud;
 
 import com.rootrecord.minecraft.common.McDayClock;
-import com.rootrecord.minecraft.common.config.RootRecordCloudConfig;
 import com.rootrecord.minecraft.roottimes.RootTimesPlugin;
 import com.rootrecord.minecraft.roottimes.api.McDaySnapshot;
 import com.rootrecord.minecraft.roottimes.clock.ClockService;
+import com.rootrecord.minecraft.roottimes.mysql.TimesStatusStore;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.logging.Level;
 
-/** Pushes live Times status to api.rootmc.net for per-server /s/{id}/ pages. */
+/**
+ * Upserts live Times status into host MySQL ({@code root_times_status}).
+ * Cloudflare reads via Hyperdrive → LIVE_DB — no HTTPS push.
+ */
 public final class TimesCloudReporter {
 
     private final RootTimesPlugin plugin;
-    private final HttpClient http =
-            HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(12)).build();
     private BukkitTask task;
-    private boolean loggedMissingCreds;
+    private boolean loggedMissingMysql;
     private boolean loggedOk;
     private volatile String lastError = "";
 
@@ -37,15 +34,22 @@ public final class TimesCloudReporter {
 
     public void start() {
         stop();
-        if (!plugin.timesConfig().cloudStatusEnabled()) {
-            plugin.getLogger().info("Cloud status reporter disabled (cloud-status.enabled: false)");
+        if (!plugin.timesConfig().mysqlStatusEnabled()) {
+            plugin.getLogger().info("MySQL status reporter disabled (mysql-status.enabled: false)");
             return;
         }
-        int seconds = plugin.timesConfig().cloudStatusIntervalSeconds();
+        if (!plugin.mysql().ready()) {
+            plugin.getLogger().warning("MySQL status reporter skipped — database.yml not ready");
+            return;
+        }
+        int seconds = plugin.timesConfig().mysqlStatusIntervalSeconds();
         long ticks = Math.max(20L, seconds * 20L);
-        // Collect on main thread, POST off-thread
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tickCollect, ticks, ticks);
-        plugin.getLogger().info("Cloud status reporter every " + seconds + "s → /api/rootmc/times/status");
+        plugin.getLogger().info(
+                "MySQL status reporter every "
+                        + seconds
+                        + "s → "
+                        + TimesStatusStore.tableName(plugin.timesConfig()));
     }
 
     public void stop() {
@@ -56,13 +60,10 @@ public final class TimesCloudReporter {
     }
 
     private void tickCollect() {
-        RootRecordCloudConfig.CloudSettings cloud =
-                RootRecordCloudConfig.resolve(plugin, plugin.yamlConfig().config());
-        if (!cloud.hasServerCredentials()) {
-            if (!loggedMissingCreds) {
-                loggedMissingCreds = true;
-                plugin.getLogger().warning(
-                        "Cloud status skipped — set cloud.server-id / server-secret in plugins/RootMC/cloud.yml");
+        if (!plugin.mysql().ready()) {
+            if (!loggedMissingMysql) {
+                loggedMissingMysql = true;
+                plugin.getLogger().warning("MySQL status skipped — database not configured");
             }
             return;
         }
@@ -78,52 +79,53 @@ public final class TimesCloudReporter {
             }
         }
         int online = Bukkit.getOnlinePlayers().size();
-        String pluginsJson = installedPluginsJson();
-        String body = buildBody(snap, online, afkCount, players, pluginsJson);
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> post(cloud, body));
+        final String pluginsJson = installedPluginsJson();
+        final String playersJson = playersJson(players);
+        final String timezone = McDayClock.zone().getId();
+        final McDaySnapshot snapFinal = snap;
+        final int onlineFinal = online;
+        final int afkFinal = afkCount;
+        Bukkit.getScheduler().runTaskAsynchronously(
+                plugin,
+                () -> upsertMysql(snapFinal, onlineFinal, afkFinal, playersJson, pluginsJson, timezone));
     }
 
-    private void post(RootRecordCloudConfig.CloudSettings cloud, String body) {
-        try {
-            String url = cloud.apiBase() + "/api/rootmc/times/status";
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Content-Type", "application/json")
-                    .header("X-RootStat-Server-Id", cloud.serverId())
-                    .header("X-RootStat-Server-Secret", cloud.serverSecret())
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
-            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() >= 400) {
-                lastError = "HTTP " + response.statusCode();
-                plugin.getLogger().warning("Cloud status push failed: " + lastError);
-                return;
-            }
+    private void upsertMysql(
+            McDaySnapshot snap,
+            int online,
+            int afk,
+            String playersJson,
+            String pluginsJson,
+            String timezone) {
+        try (Connection c = plugin.mysql().open()) {
+            TimesStatusStore.upsert(
+                    c,
+                    plugin.timesConfig(),
+                    snap.dayId(),
+                    (int) snap.timeOfDayTicks(),
+                    snap.fullTime(),
+                    snap.phase(),
+                    snap.lengthMinutes(),
+                    online,
+                    afk,
+                    playersJson,
+                    pluginsJson,
+                    timezone);
             if (!loggedOk) {
                 loggedOk = true;
-                plugin.getLogger().info("Cloud status push OK → " + cloud.apiBase());
+                plugin.getLogger().info(
+                        "MySQL status OK → " + TimesStatusStore.tableName(plugin.timesConfig()));
             }
             lastError = "";
         } catch (Exception ex) {
             lastError = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-            plugin.getLogger().log(Level.FINE, "Cloud status push failed: " + lastError, ex);
+            plugin.getLogger().log(Level.WARNING, "MySQL status upsert failed: " + lastError, ex);
         }
     }
 
-    private static String buildBody(
-            McDaySnapshot snap, int online, int afk, List<PlayerSnap> players, String pluginsJson) {
-        StringBuilder body = new StringBuilder(512);
-        body.append('{');
-        body.append("\"dayId\":").append(snap.dayId());
-        body.append(",\"todTicks\":").append(snap.timeOfDayTicks());
-        body.append(",\"fullTime\":").append(snap.fullTime());
-        body.append(",\"phase\":\"").append(escape(snap.phase())).append('"');
-        body.append(",\"lengthMinutes\":").append(snap.lengthMinutes());
-        body.append(",\"online\":").append(online);
-        body.append(",\"afk\":").append(afk);
-        body.append(",\"timezone\":\"").append(escape(McDayClock.zone().getId())).append('"');
-        body.append(",\"players\":[");
+    private static String playersJson(List<PlayerSnap> players) {
+        StringBuilder body = new StringBuilder(256);
+        body.append('[');
         for (int i = 0; i < players.size(); i++) {
             if (i > 0) {
                 body.append(',');
@@ -135,8 +137,7 @@ public final class TimesCloudReporter {
                     .append(p.afk())
                     .append('}');
         }
-        body.append("],\"plugins\":").append(pluginsJson != null ? pluginsJson : "[]");
-        body.append('}');
+        body.append(']');
         return body.toString();
     }
 

@@ -47,6 +47,11 @@ web:
   token: ""
 
 cloud-status:
+  enabled: false
+  interval-seconds: 5
+
+# Live status → host MySQL (Hyperdrive syncs to Cloudflare LIVE_DB). No HTTPS.
+mysql-status:
   enabled: true
   interval-seconds: 5
 
@@ -57,3 +62,4 @@ tables:
   activity-timezone: activity_timezone
   activity-hourly: activity_hourly
   afk-sessions: times_afk_sessions
+  times-status: times_status

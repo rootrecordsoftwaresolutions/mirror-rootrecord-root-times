@@ -32,6 +32,7 @@ public final class TimesMysql {
             PlaytimeStore.initSchema(c, config);
             ActivityHarvestStore.initSchema(c, config);
             AfkSessionStore.initSchema(c, config);
+            TimesStatusStore.initSchema(c, config);
         }
     }
 }

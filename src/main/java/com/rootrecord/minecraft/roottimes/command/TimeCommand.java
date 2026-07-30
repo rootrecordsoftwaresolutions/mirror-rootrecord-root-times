@@ -117,7 +117,12 @@ public final class TimeCommand implements CommandExecutor {
 
     private void send(CommandSender sender, Snapshot snap) {
         ChatUi.banner(sender, "Time");
-        ChatUi.row(sender, "New day", snap.untilMc() + " (MC / Towny synced)");
+        boolean towny = Bukkit.getPluginManager().isPluginEnabled("Towny");
+        if (towny) {
+            ChatUi.row(sender, "New day", snap.untilMc() + " (MC / Towny synced)");
+        } else {
+            ChatUi.row(sender, "New ingame day", snap.untilMc());
+        }
         ChatUi.row(sender, "Uptime", snap.uptime() + " | longest " + snap.longestUptime());
         ChatUi.row(sender, "Longest session", snap.longestSession());
         ChatUi.row(sender, "Top playtime", snap.topPlaytime());

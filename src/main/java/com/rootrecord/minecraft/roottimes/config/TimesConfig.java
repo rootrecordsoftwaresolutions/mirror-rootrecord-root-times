@@ -33,8 +33,8 @@ public final class TimesConfig {
     private final String webHost;
     private final int webPort;
     private final String webToken;
-    private final boolean cloudStatusEnabled;
-    private final int cloudStatusIntervalSeconds;
+    private final boolean mysqlStatusEnabled;
+    private final int mysqlStatusIntervalSeconds;
     private final String tablePrefix;
     private final String playtimeTable;
     private final String playtimeMonthlyTable;
@@ -42,6 +42,7 @@ public final class TimesConfig {
     private final String activityTimezoneTable;
     private final String activityHourlyTable;
     private final String afkSessionsTable;
+    private final String timesStatusTable;
     private final RootMcDatabaseConfig.DatabaseSettings database;
     private final JavaPlugin plugin;
     private final String dayIdBaseRaw;
@@ -73,8 +74,8 @@ public final class TimesConfig {
             String webHost,
             int webPort,
             String webToken,
-            boolean cloudStatusEnabled,
-            int cloudStatusIntervalSeconds,
+            boolean mysqlStatusEnabled,
+            int mysqlStatusIntervalSeconds,
             String tablePrefix,
             String playtimeTable,
             String playtimeMonthlyTable,
@@ -82,6 +83,7 @@ public final class TimesConfig {
             String activityTimezoneTable,
             String activityHourlyTable,
             String afkSessionsTable,
+            String timesStatusTable,
             RootMcDatabaseConfig.DatabaseSettings database,
             JavaPlugin plugin,
             String dayIdBaseRaw) {
@@ -111,8 +113,8 @@ public final class TimesConfig {
         this.webHost = webHost;
         this.webPort = webPort;
         this.webToken = webToken;
-        this.cloudStatusEnabled = cloudStatusEnabled;
-        this.cloudStatusIntervalSeconds = cloudStatusIntervalSeconds;
+        this.mysqlStatusEnabled = mysqlStatusEnabled;
+        this.mysqlStatusIntervalSeconds = mysqlStatusIntervalSeconds;
         this.tablePrefix = tablePrefix;
         this.playtimeTable = playtimeTable;
         this.playtimeMonthlyTable = playtimeMonthlyTable;
@@ -120,6 +122,7 @@ public final class TimesConfig {
         this.activityTimezoneTable = activityTimezoneTable;
         this.activityHourlyTable = activityHourlyTable;
         this.afkSessionsTable = afkSessionsTable;
+        this.timesStatusTable = timesStatusTable;
         this.database = database;
         this.plugin = plugin;
         this.dayIdBaseRaw = dayIdBaseRaw == null ? "0" : dayIdBaseRaw;
@@ -143,6 +146,11 @@ public final class TimesConfig {
         String tz = cfg.getString("tables.activity-timezone", "activity_timezone");
         String hourly = cfg.getString("tables.activity-hourly", "activity_hourly");
         String afk = cfg.getString("tables.afk-sessions", "times_afk_sessions");
+        String timesStatus = cfg.getString("tables.times-status", "times_status");
+        boolean mysqlStatus = cfg.getBoolean("mysql-status.enabled", true);
+        int statusInterval = cfg.contains("mysql-status.interval-seconds")
+                ? cfg.getInt("mysql-status.interval-seconds", 5)
+                : cfg.getInt("cloud-status.interval-seconds", 5);
         return new TimesConfig(
                 cfg.getBoolean("minecraft-day.enabled", true),
                 cfg.getString("minecraft-day.timezone", "UTC"),
@@ -176,8 +184,8 @@ public final class TimesConfig {
                 cfg.getString("web.host", "127.0.0.1"),
                 Math.max(1, cfg.getInt("web.port", 8765)),
                 cfg.getString("web.token", ""),
-                cfg.getBoolean("cloud-status.enabled", true),
-                Math.max(5, cfg.getInt("cloud-status.interval-seconds", 5)),
+                mysqlStatus,
+                Math.max(5, statusInterval),
                 prefix,
                 prefix + play,
                 prefix + playMonthly,
@@ -185,6 +193,7 @@ public final class TimesConfig {
                 prefix + tz,
                 prefix + hourly,
                 prefix + afk,
+                prefix + timesStatus,
                 db,
                 plugin,
                 cfg.getString("minecraft-day.day-id-base", "0"));
@@ -303,12 +312,24 @@ public final class TimesConfig {
         return webToken;
     }
 
-    public boolean cloudStatusEnabled() {
-        return cloudStatusEnabled;
+    public boolean mysqlStatusEnabled() {
+        return mysqlStatusEnabled;
     }
 
+    public int mysqlStatusIntervalSeconds() {
+        return mysqlStatusIntervalSeconds;
+    }
+
+    /** @deprecated HTTPS cloud push retired — use {@link #mysqlStatusEnabled()}. */
+    @Deprecated
+    public boolean cloudStatusEnabled() {
+        return false;
+    }
+
+    /** @deprecated HTTPS cloud push retired — use {@link #mysqlStatusIntervalSeconds()}. */
+    @Deprecated
     public int cloudStatusIntervalSeconds() {
-        return cloudStatusIntervalSeconds;
+        return mysqlStatusIntervalSeconds;
     }
 
     public String tablePrefix() {
@@ -352,6 +373,10 @@ public final class TimesConfig {
 
     public String afkSessionsTable() {
         return afkSessionsTable;
+    }
+
+    public String timesStatusTable() {
+        return timesStatusTable;
     }
 
     public RootMcDatabaseConfig.DatabaseSettings database() {

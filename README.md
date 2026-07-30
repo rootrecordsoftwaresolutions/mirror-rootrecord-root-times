@@ -5,7 +5,7 @@ Minecraft-day clock, play/AFK/activity harvest, timezone peaks, join welcome, an
 | Field | Value |
 |-------|-------|
 | **Folder / artifact** | `root-times` |
-| **Version** | `1.7.2` |
+| **Version** | `1.7.6` |
 | **Bukkit name** | `Root-Times` |
 | **Paper API** | `26.1` |
 | **Author** | RootMC |
@@ -22,7 +22,7 @@ When the BuiltByBit product is live, this section will link directly to the paid
 
 ## Install
 
-1. Purchase / download `root-times-1.7.2.jar` from BuiltByBit (coming soon) or your licensed RootMC distribution channel.
+1. Purchase / download `root-times-1.7.6.jar` from BuiltByBit (coming soon) or your licensed RootMC distribution channel.
 2. Install **[Root-Core](https://github.com/RootRecord/root-core)** first when required (license/cloud spine for the suite).
 3. Remove any older `root-times-*.jar` from `plugins/`.
 4. Drop the new jar into `plugins/` and restart (or use Root-Core suite updater when this plugin is on your licensed manifest).

@@ -180,18 +180,36 @@ public final class PlaytimeStore {
         String monthly = config.playtimeMonthlyTable();
 
         if (tableExists(c, legacyGlobal) && !legacyGlobal.equals(table)) {
-            try (PreparedStatement ps = c.prepareStatement(
-                    """
-                    INSERT IGNORE INTO %s (uuid, scope, username, seconds, first_join_at, last_login_at, updated_at)
-                    SELECT uuid, ?, username, total_playtime_seconds, first_join_at, last_login_at, updated_at
-                    FROM %s
-                    """
-                            .formatted(table, legacyGlobal))) {
-                ps.setString(1, SCOPE_TOWNY);
-                ps.executeUpdate();
+            if (columnExists(c, legacyGlobal, "scope") && columnExists(c, legacyGlobal, "seconds")) {
+                // Already scoped (e.g. prior Root-Times migration left root_rootmc_playtime in new shape).
+                try (PreparedStatement ps = c.prepareStatement(
+                        """
+                        INSERT IGNORE INTO %s (uuid, scope, username, seconds, first_join_at, last_login_at, updated_at)
+                        SELECT uuid, scope, COALESCE(username, 'Unknown'), seconds,
+                               COALESCE(first_join_at, UTC_TIMESTAMP()),
+                               COALESCE(last_login_at, UTC_TIMESTAMP()),
+                               COALESCE(updated_at, UTC_TIMESTAMP())
+                        FROM %s
+                        """
+                                .formatted(table, legacyGlobal))) {
+                    ps.executeUpdate();
+                }
+            } else if (columnExists(c, legacyGlobal, "total_playtime_seconds")) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        """
+                        INSERT IGNORE INTO %s (uuid, scope, username, seconds, first_join_at, last_login_at, updated_at)
+                        SELECT uuid, ?, username, total_playtime_seconds, first_join_at, last_login_at, updated_at
+                        FROM %s
+                        """
+                                .formatted(table, legacyGlobal))) {
+                    ps.setString(1, SCOPE_TOWNY);
+                    ps.executeUpdate();
+                }
             }
         }
-        if (tableExists(c, legacyServer)) {
+        if (tableExists(c, legacyServer)
+                && columnExists(c, legacyServer, "server_id")
+                && columnExists(c, legacyServer, "playtime_seconds")) {
             try (PreparedStatement ps = c.prepareStatement(
                     """
                     INSERT IGNORE INTO %s (uuid, scope, username, seconds, first_join_at, last_login_at, updated_at)
@@ -204,15 +222,27 @@ public final class PlaytimeStore {
             normalizeKnownScopes(c, table);
         }
         if (tableExists(c, legacyMonthly) && !legacyMonthly.equals(monthly)) {
-            try (PreparedStatement ps = c.prepareStatement(
-                    """
-                    INSERT IGNORE INTO %s (uuid, scope, month_key, seconds, updated_at)
-                    SELECT uuid, ?, month_key, playtime_seconds, updated_at
-                    FROM %s
-                    """
-                            .formatted(monthly, legacyMonthly))) {
-                ps.setString(1, SCOPE_TOWNY);
-                ps.executeUpdate();
+            if (columnExists(c, legacyMonthly, "scope") && columnExists(c, legacyMonthly, "seconds")) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        """
+                        INSERT IGNORE INTO %s (uuid, scope, month_key, seconds, updated_at)
+                        SELECT uuid, scope, month_key, seconds, COALESCE(updated_at, UTC_TIMESTAMP())
+                        FROM %s
+                        """
+                                .formatted(monthly, legacyMonthly))) {
+                    ps.executeUpdate();
+                }
+            } else if (columnExists(c, legacyMonthly, "playtime_seconds")) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        """
+                        INSERT IGNORE INTO %s (uuid, scope, month_key, seconds, updated_at)
+                        SELECT uuid, ?, month_key, playtime_seconds, updated_at
+                        FROM %s
+                        """
+                                .formatted(monthly, legacyMonthly))) {
+                    ps.setString(1, SCOPE_TOWNY);
+                    ps.executeUpdate();
+                }
             }
         }
     }
@@ -221,19 +251,92 @@ public final class PlaytimeStore {
         if (!columnExists(c, table, "scope")) {
             return;
         }
+        mergeScopeAliases(c, table, SCOPE_CLAIMS, "c", "g2", "gen2", "gen-2");
+        mergeScopeAliases(c, table, SCOPE_TOWNY, "t", "g1", "gen1", "gen-1", "official");
+        mergeScopeAliases(c, table, "dev", "test", "portal", "devportal", "rootmc-dev", "rootmc_dev");
+    }
+
+    /**
+     * Fold alias scopes into {@code canonical}. When a canonical row already exists for the same
+     * player (and month if monthly), merge seconds into it and delete the alias — a plain UPDATE
+     * would hit PRIMARY KEY collisions.
+     */
+    private static void mergeScopeAliases(Connection c, String table, String canonical, String... aliases)
+            throws SQLException {
+        if (aliases.length == 0) {
+            return;
+        }
+        String inList = String.join(
+                ",",
+                java.util.Arrays.stream(aliases)
+                        .map(a -> "'" + a.replace("'", "''").toLowerCase(Locale.ROOT) + "'")
+                        .toList());
+        String canon = canonical.replace("'", "''");
+        boolean monthly = columnExists(c, table, "month_key");
         try (Statement st = c.createStatement()) {
+            if (monthly) {
+                st.executeUpdate(
+                        """
+                        UPDATE `%s` t
+                        INNER JOIN (
+                          SELECT uuid, month_key,
+                                 SUM(seconds) AS add_sec,
+                                 MAX(updated_at) AS max_updated
+                          FROM `%s`
+                          WHERE LOWER(scope) IN (%s)
+                          GROUP BY uuid, month_key
+                        ) a ON a.uuid = t.uuid AND a.month_key = t.month_key
+                        SET t.seconds = t.seconds + a.add_sec,
+                            t.updated_at = GREATEST(t.updated_at, a.max_updated)
+                        WHERE t.scope = '%s'
+                        """
+                                .formatted(table, table, inList, canon));
+                st.executeUpdate(
+                        """
+                        DELETE a FROM `%s` a
+                        INNER JOIN `%s` t
+                          ON t.uuid = a.uuid AND t.month_key = a.month_key AND t.scope = '%s'
+                        WHERE LOWER(a.scope) IN (%s)
+                        """
+                                .formatted(table, table, canon, inList));
+            } else {
+                st.executeUpdate(
+                        """
+                        UPDATE `%s` t
+                        INNER JOIN (
+                          SELECT uuid,
+                                 SUM(seconds) AS add_sec,
+                                 MAX(updated_at) AS max_updated,
+                                 MAX(last_login_at) AS max_login,
+                                 MIN(first_join_at) AS min_join
+                          FROM `%s`
+                          WHERE LOWER(scope) IN (%s)
+                          GROUP BY uuid
+                        ) a ON a.uuid = t.uuid
+                        SET t.seconds = t.seconds + a.add_sec,
+                            t.updated_at = GREATEST(t.updated_at, a.max_updated),
+                            t.last_login_at = GREATEST(t.last_login_at, a.max_login),
+                            t.first_join_at = LEAST(t.first_join_at, a.min_join)
+                        WHERE t.scope = '%s'
+                        """
+                                .formatted(table, table, inList, canon));
+                st.executeUpdate(
+                        """
+                        DELETE a FROM `%s` a
+                        INNER JOIN `%s` t
+                          ON t.uuid = a.uuid AND t.scope = '%s'
+                        WHERE LOWER(a.scope) IN (%s)
+                        """
+                                .formatted(table, table, canon, inList));
+            }
             st.executeUpdate(
                     "UPDATE `"
                             + table
-                            + "` SET scope='claims' WHERE LOWER(scope) IN ('c','g2','gen2','gen-2')");
-            st.executeUpdate(
-                    "UPDATE `"
-                            + table
-                            + "` SET scope='towny' WHERE LOWER(scope) IN ('t','g1','gen1','gen-1','official')");
-            st.executeUpdate(
-                    "UPDATE `"
-                            + table
-                            + "` SET scope='dev' WHERE LOWER(scope) IN ('test','portal','devportal','rootmc-dev','rootmc_dev')");
+                            + "` SET scope='"
+                            + canon
+                            + "' WHERE LOWER(scope) IN ("
+                            + inList
+                            + ")");
         }
     }
 
